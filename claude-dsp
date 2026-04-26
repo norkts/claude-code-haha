@@ -1,2 +1,19 @@
-#!/bin/sh
-bin/claude-haha --dangerously-skip-permissions
+#!/usr/bin/env bash
+
+export CALLER_DIR="$(pwd -W 2>/dev/null || pwd)"
+ROOT_DIR=/Users/norkts/trae_projects/claude-code-haha
+
+cd "$ROOT_DIR"
+
+# Use passed env file or default to .env
+ENV_FILE="${1:-.env}"
+shift  # Remove the env file arg, pass remaining args to the script
+
+echo -e '\033]0;${ROOT_DIR}\007'
+# Force recovery CLI (simple readline REPL, no Ink TUI)
+if [[ "${CLAUDE_CODE_FORCE_RECOVERY_CLI:-0}" == "1" ]]; then
+  exec bun --env-file="$ENV_FILE" ./src/localRecoveryCli.ts "$@"
+fi
+
+# Default: full CLI with Ink TUI
+exec bun --env-file="$ENV_FILE" ./src/entrypoints/cli.tsx --dangerously-skip-permissions "$@"
