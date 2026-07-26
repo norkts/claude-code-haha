@@ -2,12 +2,10 @@
 
 export CALLER_DIR="$(pwd -W 2>/dev/null || pwd)"
 
-# Auto-detect ROOT_DIR from script location or current directory
-if [[ -n "$BASH_SOURCE" ]]; then
-  ROOT_DIR="$(cd "$(dirname "$BASH_SOURCE")" && pwd)"
-else
-  ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-fi
+# Auto-detect ROOT_DIR from script location
+# Use $0 as fallback since BASH_SOURCE might have Windows path issues
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+ROOT_DIR="$SCRIPT_DIR"
 
 cd "$ROOT_DIR"
 
