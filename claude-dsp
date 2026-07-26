@@ -10,10 +10,20 @@ ENV_FILE="${1:-.env}"
 shift  # Remove the env file arg, pass remaining args to the script
 
 echo -e '\033]0;${ROOT_DIR}\007'
+
+# Auto-detect Windows (Git Bash/MSYS2/Cygwin) and add --no-stdin if not already present
+SKIP_STDIN=""
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ -n "$WINDIR" ]]; then
+  # Check if --no-stdin is already in the arguments
+  if [[ ! "$*" == *"--no-stdin"* ]]; then
+    SKIP_STDIN="--no-stdin"
+  fi
+fi
+
 # Force recovery CLI (simple readline REPL, no Ink TUI)
 if [[ "${CLAUDE_CODE_FORCE_RECOVERY_CLI:-0}" == "1" ]]; then
-  exec bun --env-file="$ENV_FILE" ./src/localRecoveryCli.ts "$@"
+  exec bun --env-file="$ENV_FILE" ./src/localRecoveryCli.ts $SKIP_STDIN "$@"
 fi
 
 # Default: full CLI with Ink TUI
-exec bun --env-file="$ENV_FILE" ./src/entrypoints/cli.tsx --dangerously-skip-permissions "$@"
+exec bun --env-file="$ENV_FILE" ./src/entrypoints/cli.tsx --dangerously-skip-permissions $SKIP_STDIN "$@"

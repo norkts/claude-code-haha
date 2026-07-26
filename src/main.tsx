@@ -855,10 +855,15 @@ export async function main() {
   await run();
   profileCheckpoint('main_after_run');
 }
-async function getInputPrompt(prompt: string, inputFormat: 'text' | 'stream-json'): Promise<string | AsyncIterable<string>> {
+async function getInputPrompt(prompt: string, inputFormat: 'text' | 'stream-json', skipStdin?: boolean): Promise<string | AsyncIterable<string>> {
+  // Check if stdin should be skipped via command line flag or environment variable
+  const shouldSkipStdin = skipStdin || process.env.CLAUDE_CODE_NO_STDIN === '1';
+
   if (!process.stdin.isTTY &&
   // Input hijacking breaks MCP.
-  !process.argv.includes('mcp')) {
+  !process.argv.includes('mcp') &&
+  // Skip if explicitly requested or on Windows where TTY detection can be unreliable
+  !shouldSkipStdin) {
     if (inputFormat === 'stream-json') {
       return process.stdin;
     }
@@ -876,7 +881,10 @@ async function getInputPrompt(prompt: string, inputFormat: 'text' | 'stream-json
     const timedOut = await peekForStdinData(process.stdin, 3000);
     process.stdin.off('data', onData);
     if (timedOut) {
-      process.stderr.write('Warning: no stdin data received in 3s, proceeding without it. ' + 'If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.\n');
+      const platformHint = process.platform === 'win32'
+        ? ' On Windows, this warning may appear even in interactive mode. Use --no-stdin to skip this check, or set CLAUDE_CODE_NO_STDIN=1 in your environment.'
+        : '';
+      process.stderr.write('Warning: no stdin data received in 3s, proceeding without it. ' + 'If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.' + platformHint + '\n');
     }
     return [prompt, data].filter(Boolean).join('\n');
   }
@@ -1003,7 +1011,7 @@ async function run(): Promise<CommanderCommand> {
   // `mcp` and `add` as paths, then choked on --transport as an unknown
   // top-level option. Single-value + collect accumulator means each
   // --plugin-dir takes exactly one arg; repeat the flag for multiple dirs.
-  .option('--plugin-dir <path>', 'Load plugins from a directory for this session only (repeatable: --plugin-dir A --plugin-dir B)', (val: string, prev: string[]) => [...prev, val], [] as string[]).option('--disable-slash-commands', 'Disable all skills', () => true).option('--chrome', 'Enable Claude in Chrome integration').option('--no-chrome', 'Disable Claude in Chrome integration').option('--no-computer-use', 'Disable Computer Use MCP for this session').option('--file <specs...>', 'File resources to download at startup. Format: file_id:relative_path (e.g., --file file_abc:doc.txt file_def:img.png)').action(async (prompt, options) => {
+  .option('--plugin-dir <path>', 'Load plugins from a directory for this session only (repeatable: --plugin-dir A --plugin-dir B)', (val: string, prev: string[]) => [...prev, val], [] as string[]).option('--disable-slash-commands', 'Disable all skills', () => true).option('--chrome', 'Enable Claude in Chrome integration').option('--no-chrome', 'Disable Claude in Chrome integration').option('--no-computer-use', 'Disable Computer Use MCP for this session').option('--no-stdin', 'Skip waiting for stdin input. Useful on Windows where TTY detection can be unreliable, or when you want to ensure no input is read from stdin.', () => true).option('--file <specs...>', 'File resources to download at startup. Format: file_id:relative_path (e.g., --file file_abc:doc.txt file_def:img.png)').action(async (prompt, options) => {
     profileCheckpoint('action_handler_start');
 
     // --bare = one-switch minimal mode. Sets SIMPLE so all the existing
@@ -1872,7 +1880,7 @@ async function run(): Promise<CommanderCommand> {
       process.exit(1);
     }
     const effectivePrompt = prompt || '';
-    let inputPrompt = await getInputPrompt(effectivePrompt, (inputFormat ?? 'text') as 'text' | 'stream-json');
+    let inputPrompt = await getInputPrompt(effectivePrompt, (inputFormat ?? 'text') as 'text' | 'stream-json', options.noStdin);
     profileCheckpoint('action_after_input_prompt');
 
     // Activate proactive mode BEFORE getTools() so SleepTool.isEnabled()
