@@ -888,6 +888,10 @@ async function getInputPrompt(prompt: string, inputFormat: 'text' | 'stream-json
     }
     return [prompt, data].filter(Boolean).join('\n');
   }
+  // When skipping stdin, return just the prompt (may be empty string)
+  if (shouldSkipStdin) {
+    return prompt || '';
+  }
   return prompt;
 }
 async function run(): Promise<CommanderCommand> {
