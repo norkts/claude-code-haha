@@ -13,9 +13,9 @@ echo -e '\033]0;${ROOT_DIR}\007'
 
 # Auto-detect Windows (Git Bash/MSYS2/Cygwin) and add --no-stdin if not already present
 SKIP_STDIN=""
-if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ -n "$WINDIR" ]]; then
+if [[ "$OSTYPE" == msys* ]] || [[ "$OSTYPE" == cygwin* ]] || [[ -n "$WINDIR" ]] || [[ "$OSTYPE" == "win32" ]]; then
   # Check if --no-stdin is already in the arguments
-  if [[ ! "$*" == *"--no-stdin"* ]]; then
+  if [[ "$*" != *"--no-stdin"* ]]; then
     SKIP_STDIN="--no-stdin"
   fi
 fi
