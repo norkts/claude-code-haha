@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-
+export MSYS=enable_pcon
 export CALLER_DIR="$(pwd -W 2>/dev/null || pwd)"
 
 # 获取调用脚本原始路径
@@ -33,21 +33,34 @@ cd "$ROOT_DIR"
 ENV_FILE="${1:-.env}"
 shift  # Remove the env file arg, pass remaining args to the script
 
-echo -e '\033]0;${ROOT_DIR}\007'
+echo -e "\033]0;${ROOT_DIR}\007"
 
-# Auto-detect Windows (Git Bash/MSYS2/Cygwin) and add --no-stdin if not already present
-SKIP_STDIN=""
+# Auto-detect Windows (Git Bash/MSYS2/Cygwin)
+IS_WINDOWS=false
 if [[ "$OSTYPE" == msys* ]] || [[ "$OSTYPE" == cygwin* ]] || [[ -n "$WINDIR" ]] || [[ "$OSTYPE" == "win32" ]]; then
-  # Check if --no-stdin is already in the arguments
+  IS_WINDOWS=true
+fi
+
+# On Windows, force recovery CLI mode because Ink TUI requires raw mode
+# which is not supported on process.stdin in Git Bash/MSYS2/Cygwin
+# User can explicitly set CLAUDE_CODE_FORCE_RECOVERY_CLI=0 to disable this
+
+
+# Extra args for Windows
+EXTRA_ARGS=()
+if [[ "$IS_WINDOWS" == true ]]; then
+  # Only add --no-stdin if NOT using -p/--print mode
   if [[ "$*" != *"--no-stdin"* ]]; then
-    SKIP_STDIN="--no-stdin"
+    if [[ "$*" != *"-p "* ]] && [[ "$*" != *"--print "* ]] && [[ "$*" != "-p" ]] && [[ "$*" != "--print" ]]; then
+      EXTRA_ARGS+=("--no-stdin")
+    fi
   fi
 fi
 
 # Force recovery CLI (simple readline REPL, no Ink TUI)
 if [[ "${CLAUDE_CODE_FORCE_RECOVERY_CLI:-0}" == "1" ]]; then
-  exec bun --env-file="$ENV_FILE" ./src/localRecoveryCli.ts $SKIP_STDIN "$@"
+  exec bun --env-file="$ENV_FILE" ./src/localRecoveryCli.ts "${EXTRA_ARGS[@]}" "$@"
 fi
 
 # Default: full CLI with Ink TUI
-exec bun --env-file="$ENV_FILE" ./src/entrypoints/cli.tsx --dangerously-skip-permissions $SKIP_STDIN "$@"
+exec bun --env-file="$ENV_FILE" ./src/entrypoints/cli.tsx --dangerously-skip-permissions "${EXTRA_ARGS[@]}" "$@"

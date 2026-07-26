@@ -801,7 +801,10 @@ export async function main() {
   const hasPrintFlag = cliArgs.includes('-p') || cliArgs.includes('--print');
   const hasInitOnlyFlag = cliArgs.includes('--init-only');
   const hasSdkUrl = cliArgs.some(arg => arg.startsWith('--sdk-url'));
-  const isNonInteractive = hasPrintFlag || hasInitOnlyFlag || hasSdkUrl || !process.stdout.isTTY;
+  const hasNoStdin = cliArgs.includes("--no-stdin") || process.env.CLAUDE_CODE_NO_STDIN === "1";
+  // In Git Bash/MSYS2 on Windows, process.stdout.isTTY is false even in interactive mode.
+  // Only treat as non-interactive if explicitly using -p/--print or if stdin is not a TTY AND --no-stdin is not set.
+  const isNonInteractive = hasPrintFlag || hasInitOnlyFlag || hasSdkUrl || (!process.stdout.isTTY && !hasNoStdin);
 
   // Stop capturing early input for non-interactive modes
   if (isNonInteractive) {

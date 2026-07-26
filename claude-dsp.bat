@@ -17,5 +17,5 @@ REM Check if CLAUDE_CODE_FORCE_RECOVERY_CLI is set to 1
 if "%CLAUDE_CODE_FORCE_RECOVERY_CLI%"=="1" (
     bun --env-file="%ENV_FILE%" ./src/localRecoveryCli.ts --no-stdin %*
 ) else (
-    bun --env-file="%ENV_FILE%" ./src/entrypoints/cli.tsx --dangerously-skip-permissions --no-stdin %*
+    bun --env-file=.env ./src/entrypoints/cli.tsx --dangerously-skip-permissions --no-stdin %*
 )
