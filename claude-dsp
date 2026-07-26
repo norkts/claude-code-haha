@@ -2,14 +2,30 @@
 
 export CALLER_DIR="$(pwd -W 2>/dev/null || pwd)"
 
-# Check if CLAUDE_CODE_ROOT is already set, otherwise auto-detect from script location
-if [[ -z "$CLAUDE_CODE_ROOT" ]]; then
-  # Auto-detect ROOT_DIR from script location
-  # Use $0 as fallback since BASH_SOURCE might have Windows path issues
-  CLAUDE_CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-fi
+# 获取调用脚本原始路径
+SOURCE="$0"
 
-ROOT_DIR="$CLAUDE_CODE_ROOT"
+# 循环解析软链接，直到找到真实文件
+while [ -L "$SOURCE" ]; do
+    # 获取软链接指向的目标
+    TARGET=$(readlink "$SOURCE")
+    if [[ "$TARGET" != /* ]]; then
+        # 相对路径软链接，拼接软链接所在目录
+        SOURCE_DIR=$(dirname "$SOURCE")
+        SOURCE="$SOURCE_DIR/$TARGET"
+    else
+        SOURCE="$TARGET"
+    fi
+done
+
+# SOURCE 现在是真实物理文件绝对路径
+REAL_SCRIPT="$SOURCE"
+# 真实脚本所在目录
+SCRIPT_DIR=$(dirname "$REAL_SCRIPT")
+echo "$SCRIPT_DIR"
+
+
+ROOT_DIR="$SCRIPT_DIR"
 
 cd "$ROOT_DIR"
 
