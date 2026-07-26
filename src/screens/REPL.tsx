@@ -2045,7 +2045,7 @@ export function REPL({
     // Undercover auto-enable explainer (ant-only, eliminated from external builds)
     if ("external" === 'ant' && allowDialogsWithAnimation && showUndercoverCallout) return 'undercover-callout';
 
-    // Effort callout (shown once for Opus 4.6 users when effort is enabled)
+    // Effort callout (shown once for Opus 4.7 users when effort is enabled)
     if (allowDialogsWithAnimation && showEffortCallout) return 'effort-callout';
 
     // Remote callout (shown once before first bridge enable)
@@ -2415,7 +2415,9 @@ export function REPL({
         debug,
         verbose: s.verbose,
         mainLoopModel,
-        thinkingConfig: s.thinkingEnabled !== false ? thinkingConfig : {
+        thinkingConfig: s.thinkingEnabled !== false ? (
+          thinkingConfig.type === 'disabled' ? { type: 'adaptive' } : thinkingConfig
+        ) : {
           type: 'disabled'
         },
         // Merge fresh from store rather than closing over useMergedClients'

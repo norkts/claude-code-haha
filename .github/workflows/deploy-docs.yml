@@ -1,10 +1,11 @@
-name: Deploy VitePress Docs
+name: Deploy React Site
 
 on:
   push:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'site/**'
       - 'package.json'
       - '.github/workflows/deploy-docs.yml'
   workflow_dispatch:
@@ -30,22 +31,23 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
+          cache-dependency-path: site/package-lock.json
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install site dependencies
+        run: npm --prefix site ci
 
-      - name: Build with VitePress
-        run: npm run docs:build
+      - name: Build React site
+        run: npm --prefix site run build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/.vitepress/dist
+          path: site/dist
 
   deploy:
     environment:

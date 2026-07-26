@@ -176,10 +176,53 @@ export const SDKControlGetContextUsageRequestSchema = lazySchema(() =>
   z
     .object({
       subtype: z.literal('get_context_usage'),
+      estimateOnly: z.boolean().optional(),
     })
     .describe(
       'Requests a breakdown of current context window usage by category.',
     ),
+)
+
+export const SDKControlGetSessionUsageRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('get_session_usage'),
+    })
+    .describe('Requests accumulated cost and token usage for the current session.'),
+)
+
+export const SDKControlGetSessionUsageResponseSchema = lazySchema(() =>
+  z
+    .object({
+      totalCostUSD: z.number(),
+      costDisplay: z.string(),
+      hasUnknownModelCost: z.boolean(),
+      totalAPIDuration: z.number(),
+      totalDuration: z.number(),
+      totalLinesAdded: z.number(),
+      totalLinesRemoved: z.number(),
+      totalInputTokens: z.number(),
+      totalOutputTokens: z.number(),
+      totalCacheReadInputTokens: z.number(),
+      totalCacheCreationInputTokens: z.number(),
+      totalWebSearchRequests: z.number(),
+      models: z.array(
+        z.object({
+          model: z.string(),
+          displayName: z.string(),
+          inputTokens: z.number(),
+          outputTokens: z.number(),
+          cacheReadInputTokens: z.number(),
+          cacheCreationInputTokens: z.number(),
+          webSearchRequests: z.number(),
+          costUSD: z.number(),
+          costDisplay: z.string(),
+          contextWindow: z.number(),
+          maxOutputTokens: z.number(),
+        }),
+      ),
+    })
+    .describe('Accumulated cost, duration, code change, and model usage data.'),
 )
 
 const ContextCategorySchema = lazySchema(() =>
@@ -507,7 +550,7 @@ export const SDKControlGetSettingsResponseSchema = lazySchema(() =>
           model: z.string(),
           // String levels only — numeric effort is ant-only and the
           // Zod→proto generator can't emit enum∪number unions.
-          effort: z.enum(['low', 'medium', 'high', 'max']).nullable(),
+          effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).nullable(),
         })
         .optional()
         .describe(
@@ -559,6 +602,7 @@ export const SDKControlRequestInnerSchema = lazySchema(() =>
     SDKControlSetMaxThinkingTokensRequestSchema(),
     SDKControlMcpStatusRequestSchema(),
     SDKControlGetContextUsageRequestSchema(),
+    SDKControlGetSessionUsageRequestSchema(),
     SDKHookCallbackRequestSchema(),
     SDKControlMcpMessageRequestSchema(),
     SDKControlRewindFilesRequestSchema(),

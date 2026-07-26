@@ -197,6 +197,10 @@ type State = {
   mainThreadAgentType: string | undefined
   // Remote mode (--remote flag)
   isRemoteMode: boolean
+  // True only when Remote Control is connected with inbound control enabled.
+  // Outbound-only CCR mirror mode keeps the bridge handle but cannot receive
+  // peer messages or user-file requests.
+  replBridgeActive: boolean
   // Direct connect server URL (for display in header)
   directConnectServerUrl: string | undefined
   // System prompt section cache state
@@ -388,11 +392,7 @@ function getInitialState(): State {
     mainThreadAgentType: undefined,
     // Remote mode
     isRemoteMode: false,
-    ...(process.env.USER_TYPE === 'ant'
-      ? {
-          replBridgeActive: false,
-        }
-      : {}),
+    replBridgeActive: false,
     // Direct connect server URL
     directConnectServerUrl: undefined,
     // System prompt section cache state
@@ -1090,6 +1090,14 @@ export function setKairosActive(value: boolean): void {
   STATE.kairosActive = value
 }
 
+export function isReplBridgeActive(): boolean {
+  return STATE.replBridgeActive
+}
+
+export function setReplBridgeActive(value: boolean): void {
+  STATE.replBridgeActive = value
+}
+
 export function getStrictToolResultPairing(): boolean {
   return STATE.strictToolResultPairing
 }
@@ -1289,6 +1297,22 @@ export type SessionCronTask = {
    * instead of the main REPL command queue. Session-only — never written to disk.
    */
   agentId?: string
+  /** Human-readable task name. */
+  name?: string
+  /** Task description. */
+  description?: string
+  /** Working directory for the task execution. */
+  folder?: string
+  /** Model to use. */
+  model?: string
+  /** Permission mode. */
+  permissionMode?: string
+  /** Whether to use git worktree for execution. */
+  worktree?: boolean
+  /** Schedule frequency for UI display. */
+  frequency?: string
+  /** Time string for scheduled execution. */
+  scheduledTime?: string
 }
 
 export function getSessionCronTasks(): SessionCronTask[] {
@@ -1755,4 +1779,3 @@ export function getPromptId(): string | null {
 export function setPromptId(id: string | null): void {
   STATE.promptId = id
 }
-

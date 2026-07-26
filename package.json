@@ -3,15 +3,44 @@
   "version": "999.0.0-local",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.3.14",
   "bin": {
     "claude-haha": "./bin/claude-haha"
   },
   "scripts": {
     "claude-haha": "bun run ./bin/claude-haha",
     "start": "bun run ./bin/claude-haha",
-    "docs:dev": "vitepress dev docs",
-    "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "perf:local-index": "bun run scripts/perf/local-index-benchmark.ts",
+    "perf:local-index:10k": "bun run scripts/perf/local-index-benchmark.ts --sessions 10000 --runs 20",
+    "check:pr": "bun run scripts/pr/check-pr.ts",
+    "check:impact": "bun run scripts/pr/impact-report.ts",
+    "check:policy": "bun test ./scripts/pr/bun-test-filter.test.ts ./scripts/pr/change-policy.test.ts ./scripts/pr/changed-files.test.ts ./scripts/pr/pr-triage-workflow.test.ts ./scripts/pr/pr-quality-workflow.test.ts ./scripts/pr/release-workflow.test.ts ./scripts/pr/quality-contract.test.ts ./scripts/pr/test-environment.test.ts ./scripts/release-update-metadata.test.ts ./scripts/git-hooks/install.test.ts ./scripts/quality-gate/quarantine.test.ts ./scripts/quality-gate/coverage.test.ts ./scripts/quality-gate/provider-smoke/execute.test.ts ./scripts/quality-gate/desktop-smoke/execute.test.ts ./scripts/quality-gate/providerTargets.test.ts ./scripts/quality-gate/runner.test.ts",
+    "check:server": "bun run scripts/pr/run-server-tests.ts",
+    "check:provider-contract": "bun run scripts/pr/run-provider-contract-tests.ts",
+    "check:chat-contract": "bun run scripts/pr/run-chat-contract-tests.ts",
+    "check:desktop": "cd desktop && bun run lint && bun run test -- --run && bun run build",
+    "check:electron": "cd desktop && bun run check:electron",
+    "check:adapters": "cd adapters && bun test",
+    "check:native": "cd desktop && bun run build:sidecars && bun run test:compiled-sidecar-smoke && bun run check:electron && CSC_IDENTITY_AUTO_DISCOVERY=false bun run electron:package:dir && cd .. && bun run test:package-smoke:current",
+    "check:docs": "npm --prefix site ci --loglevel=error && npm --prefix site run --loglevel=error build && npm --prefix site run --loglevel=error check",
+    "check:persistence-upgrade": "bun run scripts/quality-gate/persistence-upgrade.ts",
+    "check:quarantine": "bun run scripts/quality-gate/quarantine.ts --enforce-review-date",
+    "check:coverage": "bun run scripts/quality-gate/coverage.ts",
+    "hooks:install": "bun run scripts/git-hooks/install.ts",
+    "verify": "bun run quality:pr",
+    "quality:gate": "bun run scripts/quality-gate/index.ts",
+    "quality:verify": "bun run quality:pr",
+    "quality:providers": "bun run scripts/quality-gate/providers.ts",
+    "quality:pr": "bun run quality:gate --mode pr",
+    "quality:push": "bun run quality:gate --mode pr --skip coverage",
+    "quality:baseline": "bun run quality:gate --mode baseline",
+    "quality:release": "bun run quality:gate --mode release",
+    "quality:smoke": "bun run quality:gate --mode baseline --allow-live --only 'provider-smoke:*' --only 'desktop-smoke:*'",
+    "test:package-smoke": "bun run scripts/quality-gate/package-smoke/index.ts",
+    "test:package-smoke:current": "bun run scripts/quality-gate/package-smoke/current.ts",
+    "docs:dev": "npm --prefix site run dev",
+    "docs:build": "npm --prefix site run build",
+    "docs:preview": "npm --prefix site run preview"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "^0.0.44",
@@ -40,6 +69,7 @@
     "emoji-regex": "^10.6.0",
     "env-paths": "^4.0.0",
     "execa": "^9.6.1",
+    "fflate": "^0.8.3",
     "figures": "^6.1.0",
     "fuse.js": "^7.1.0",
     "get-east-asian-width": "^1.5.0",
@@ -67,6 +97,7 @@
     "strip-ansi": "^7.2.0",
     "supports-hyperlinks": "^4.4.0",
     "tree-kill": "^1.2.2",
+    "turndown": "^7.2.4",
     "type-fest": "^5.5.0",
     "undici": "^7.24.6",
     "usehooks-ts": "^3.1.1",
@@ -78,9 +109,13 @@
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
   },
+  "overrides": {
+    "follow-redirects": "^1.16.0"
+  },
   "devDependencies": {
     "bun-types": "^1.3.13",
     "vitepress": "^1.6.3",
-    "vue": "^3.5.13"
+    "vue": "^3.5.13",
+    "mermaid": "^11.14.0"
   }
 }

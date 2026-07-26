@@ -9,7 +9,7 @@ import { getFsImplementation } from './fsOperations.js'
 import { readJSONLFile } from './json.js'
 import { SYNTHETIC_MODEL } from './messages.js'
 import { getProjectsDir, isTranscriptMessage } from './sessionStorage.js'
-import { SHELL_TOOL_NAMES } from './shell/shellToolUtils.js'
+import { extractShotCountFromAssistantContent } from './shotStats.js'
 import { jsonParse } from './slowOperations.js'
 import {
   getTodayDateString,
@@ -32,7 +32,7 @@ export type DailyActivity = {
 
 export type DailyModelTokens = {
   date: string // YYYY-MM-DD format
-  tokensByModel: { [modelName: string]: number } // total tokens (input + output) per model
+  tokensByModel: { [modelName: string]: number } // total tokens (input + output + cache read + cache creation) per model
 }
 
 export type StreakInfo = {
@@ -49,6 +49,10 @@ export type SessionStats = {
   messageCount: number
   timestamp: string
 }
+
+export type ToolUsageMap = { [toolName: string]: number }
+
+export type SkillUsageMap = { [skillName: string]: number }
 
 export type ClaudeCodeStats = {
   // Activity overview
@@ -72,6 +76,10 @@ export type ClaudeCodeStats = {
   // Model usage aggregated
   modelUsage: { [modelName: string]: ModelUsage }
 
+  // Tool and skill usage aggregated from assistant tool_use blocks
+  toolUsage: ToolUsageMap
+  skillUsage: SkillUsageMap
+
   // Time stats
   firstSessionDate: string | null
   lastSessionDate: string | null
@@ -89,10 +97,12 @@ export type ClaudeCodeStats = {
 /**
  * Result of processing session files - intermediate stats that can be merged.
  */
-type ProcessedStats = {
+export type ProcessedStats = {
   dailyActivity: DailyActivity[]
   dailyModelTokens: DailyModelTokens[]
   modelUsage: { [modelName: string]: ModelUsage }
+  toolUsage: ToolUsageMap
+  skillUsage: SkillUsageMap
   sessionStats: SessionStats[]
   hourCounts: { [hour: number]: number }
   totalMessages: number
@@ -110,6 +120,72 @@ type ProcessOptions = {
   toDate?: string
 }
 
+type UsageLike = {
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
+}
+
+function getTotalUsageTokens(usage: UsageLike): number {
+  return (
+    (usage.input_tokens || 0) +
+    (usage.output_tokens || 0) +
+    (usage.cache_read_input_tokens || 0) +
+    (usage.cache_creation_input_tokens || 0)
+  )
+}
+
+function incrementUsageCount(counts: Map<string, number>, name: string) {
+  const normalizedName = name.trim()
+  if (!normalizedName) return
+  counts.set(normalizedName, (counts.get(normalizedName) || 0) + 1)
+}
+
+function mergeUsageCounts(
+  ...sources: Array<Record<string, number> | undefined>
+): Record<string, number> {
+  const merged: Record<string, number> = {}
+  for (const source of sources) {
+    for (const [name, count] of Object.entries(source ?? {})) {
+      if (typeof count !== 'number' || count <= 0) continue
+      merged[name] = (merged[name] || 0) + count
+    }
+  }
+  return merged
+}
+
+function getSkillNameFromToolInput(toolName: string, input: unknown) {
+  if (toolName !== 'Skill') return null
+  if (
+    typeof input === 'object' &&
+    input !== null &&
+    'skill' in input &&
+    typeof (input as { skill: unknown }).skill === 'string'
+  ) {
+    return (input as { skill: string }).skill
+  }
+  return null
+}
+
+function isDateInRange(
+  date: string,
+  fromDate?: string,
+  toDate?: string,
+): boolean {
+  if (fromDate && isDateBefore(date, fromDate)) return false
+  if (toDate && isDateBefore(toDate, date)) return false
+  return true
+}
+
+function getMessageDateKey(
+  message: Pick<TranscriptMessage, 'timestamp'>,
+): string | null {
+  const messageTimestamp = new Date(message.timestamp)
+  if (isNaN(messageTimestamp.getTime())) return null
+  return toDateString(messageTimestamp)
+}
+
 /**
  * Process session files and extract stats.
  * Can filter by date range.
@@ -122,17 +198,44 @@ async function processSessionFiles(
   const fs = getFsImplementation()
 
   const dailyActivityMap = new Map<string, DailyActivity>()
+  const dailySessionIdsMap = new Map<string, Set<string>>()
   const dailyModelTokensMap = new Map<string, { [modelName: string]: number }>()
   const sessions: SessionStats[] = []
   const hourCounts = new Map<number, number>()
   let totalMessages = 0
   let totalSpeculationTimeSavedMs = 0
   const modelUsageAgg: { [modelName: string]: ModelUsage } = {}
+  const toolUsageMap = new Map<string, number>()
+  const skillUsageMap = new Map<string, number>()
   const shotDistributionMap = feature('SHOT_STATS')
     ? new Map<number, number>()
     : undefined
   // Track parent sessions that already recorded a shot count (dedup across subagents)
   const sessionsWithShotCount = new Set<string>()
+
+  const getDailyActivity = (date: string): DailyActivity => {
+    let activity = dailyActivityMap.get(date)
+    if (!activity) {
+      activity = {
+        date,
+        messageCount: 0,
+        sessionCount: 0,
+        toolCallCount: 0,
+      }
+      dailyActivityMap.set(date, activity)
+    }
+    return activity
+  }
+
+  const markSessionActiveOnDate = (date: string, parentSessionId: string) => {
+    let sessionIds = dailySessionIdsMap.get(date)
+    if (!sessionIds) {
+      sessionIds = new Set()
+      dailySessionIdsMap.set(date, sessionIds)
+    }
+    sessionIds.add(parentSessionId)
+    getDailyActivity(date)
+  }
 
   // Process session files in parallel batches for better performance
   const BATCH_SIZE = 20
@@ -143,7 +246,6 @@ async function processSessionFiles(
         try {
           // If we have a fromDate filter, skip files that haven't been modified since then
           if (fromDate) {
-            let fileSize = 0
             try {
               const fileStat = await fs.stat(sessionFile)
               const fileModifiedDate = toDateString(fileStat.mtime)
@@ -155,23 +257,8 @@ async function processSessionFiles(
                   skipped: true,
                 }
               }
-              fileSize = fileStat.size
             } catch {
               // If we can't stat the file, try to read it anyway
-            }
-            // For large files, peek at the session start date before reading everything.
-            // Sessions that pass the mtime filter but started before fromDate are skipped
-            // (e.g. a month-old session resumed today gets a new mtime write but old start date).
-            if (fileSize > 65536) {
-              const startDate = await readSessionStartDate(sessionFile)
-              if (startDate && isDateBefore(startDate, fromDate)) {
-                return {
-                  sessionFile,
-                  entries: null,
-                  error: null,
-                  skipped: true,
-                }
-              }
             }
           }
           const entries = await readJSONLFile<Entry>(sessionFile)
@@ -207,15 +294,14 @@ async function processSessionFiles(
       // Subagent transcripts mark all messages as sidechain. We still want
       // their token usage counted, but not as separate sessions.
       const isSubagentFile = sessionFile.includes(`${sep}subagents${sep}`)
+      const parentSessionId = isSubagentFile
+        ? basename(dirname(dirname(sessionFile)))
+        : sessionId
 
       // Extract shot count from PR attribution in gh pr create calls (ant-only)
       // This must run before the sidechain filter since subagent transcripts
       // mark all messages as sidechain
       if (feature('SHOT_STATS') && shotDistributionMap) {
-        const parentSessionId = isSubagentFile
-          ? basename(dirname(dirname(sessionFile)))
-          : sessionId
-
         if (!sessionsWithShotCount.has(parentSessionId)) {
           const shotCount = extractShotCountFromMessages(messages)
           if (shotCount !== null) {
@@ -253,21 +339,12 @@ async function processSessionFiles(
       }
 
       const dateKey = toDateString(firstTimestamp)
+      const includeSessionInRange = isDateInRange(dateKey, fromDate, toDate)
 
-      // Apply date filters
-      if (fromDate && isDateBefore(dateKey, fromDate)) continue
-      if (toDate && isDateBefore(toDate, dateKey)) continue
-
-      // Track daily activity (use first message date as session date)
-      const existing = dailyActivityMap.get(dateKey) || {
-        date: dateKey,
-        messageCount: 0,
-        sessionCount: 0,
-        toolCallCount: 0,
-      }
-
-      // Subagent files contribute tokens and tool calls, but aren't sessions.
-      if (!isSubagentFile) {
+      // Session-level aggregates still represent newly started top-level
+      // sessions. Daily activity is tracked below by each message date so token
+      // totals and visible per-day session counts share one date bucket.
+      if (!isSubagentFile && includeSessionInRange) {
         const duration = lastTimestamp.getTime() - firstTimestamp.getTime()
 
         sessions.push({
@@ -279,27 +356,43 @@ async function processSessionFiles(
 
         totalMessages += mainMessages.length
 
-        existing.sessionCount++
-        existing.messageCount += mainMessages.length
-
         const hour = firstTimestamp.getHours()
         hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1)
       }
 
-      if (!isSubagentFile || dailyActivityMap.has(dateKey)) {
-        dailyActivityMap.set(dateKey, existing)
-      }
-
       // Process messages for tool usage and model stats
       for (const message of mainMessages) {
+        const messageDateKey = getMessageDateKey(message)
+        const includeMessageInRange =
+          messageDateKey !== null &&
+          isDateInRange(messageDateKey, fromDate, toDate)
+
+        if (includeMessageInRange && messageDateKey !== null) {
+          markSessionActiveOnDate(messageDateKey, parentSessionId)
+          if (!isSubagentFile) {
+            getDailyActivity(messageDateKey).messageCount++
+          }
+        }
+
         if (message.type === 'assistant') {
           const content = message.message?.content
-          if (Array.isArray(content)) {
+          if (
+            includeMessageInRange &&
+            messageDateKey !== null &&
+            Array.isArray(content)
+          ) {
             for (const block of content) {
               if (block.type === 'tool_use') {
-                const activity = dailyActivityMap.get(dateKey)
-                if (activity) {
-                  activity.toolCallCount++
+                getDailyActivity(messageDateKey).toolCallCount++
+                if (typeof block.name === 'string') {
+                  incrementUsageCount(toolUsageMap, block.name)
+                  const skillName = getSkillNameFromToolInput(
+                    block.name,
+                    block.input,
+                  )
+                  if (skillName) {
+                    incrementUsageCount(skillUsageMap, skillName)
+                  }
                 }
               }
             }
@@ -312,6 +405,10 @@ async function processSessionFiles(
 
             // Skip synthetic messages - they are internal and shouldn't appear in stats
             if (model === SYNTHETIC_MODEL) {
+              continue
+            }
+
+            if (!includeMessageInRange || messageDateKey === null) {
               continue
             }
 
@@ -336,17 +433,21 @@ async function processSessionFiles(
               usage.cache_creation_input_tokens || 0
 
             // Track daily tokens per model
-            const totalTokens =
-              (usage.input_tokens || 0) + (usage.output_tokens || 0)
+            const totalTokens = getTotalUsageTokens(usage)
             if (totalTokens > 0) {
-              const dayTokens = dailyModelTokensMap.get(dateKey) || {}
+              const tokenDateKey = messageDateKey
+              const dayTokens = dailyModelTokensMap.get(tokenDateKey) || {}
               dayTokens[model] = (dayTokens[model] || 0) + totalTokens
-              dailyModelTokensMap.set(dateKey, dayTokens)
+              dailyModelTokensMap.set(tokenDateKey, dayTokens)
             }
           }
         }
       }
     }
+  }
+
+  for (const [date, sessionIds] of dailySessionIdsMap) {
+    getDailyActivity(date).sessionCount = sessionIds.size
   }
 
   return {
@@ -357,6 +458,8 @@ async function processSessionFiles(
       .map(([date, tokensByModel]) => ({ date, tokensByModel }))
       .sort((a, b) => a.date.localeCompare(b.date)),
     modelUsage: modelUsageAgg,
+    toolUsage: Object.fromEntries(toolUsageMap),
+    skillUsage: Object.fromEntries(skillUsageMap),
     sessionStats: sessions,
     hourCounts: Object.fromEntries(hourCounts),
     totalMessages,
@@ -508,6 +611,9 @@ function cacheToStats(
     }
   }
 
+  const toolUsage = mergeUsageCounts(cache.toolUsage, todayStats?.toolUsage)
+  const skillUsage = mergeUsageCounts(cache.skillUsage, todayStats?.skillUsage)
+
   // Merge hour counts
   const hourCountsMap = new Map<number, number>()
   for (const [hour, count] of Object.entries(cache.hourCounts)) {
@@ -577,14 +683,7 @@ function cacheToStats(
         )[0]
       : null
 
-  const totalDays =
-    firstSessionDate && lastSessionDate
-      ? Math.ceil(
-          (new Date(lastSessionDate).getTime() -
-            new Date(firstSessionDate).getTime()) /
-            (1000 * 60 * 60 * 24),
-        ) + 1
-      : 0
+  const totalDays = countUtcCalendarDaysInclusive(firstSessionDate, lastSessionDate)
 
   const totalSpeculationTimeSavedMs =
     cache.totalSpeculationTimeSavedMs +
@@ -600,6 +699,8 @@ function cacheToStats(
     dailyModelTokens,
     longestSession,
     modelUsage,
+    toolUsage,
+    skillUsage,
     firstSessionDate,
     lastSessionDate,
     peakActivityDay,
@@ -711,12 +812,56 @@ export async function aggregateClaudeCodeStats(): Promise<ClaudeCodeStats> {
 
 export type StatsDateRange = '7d' | '30d' | 'all'
 
+export type ResolvedStatsDateRange = {
+  fromDate?: string
+  toDate?: string
+}
+
+const UTC_DAY_MS = 24 * 60 * 60 * 1000
+
+export function countUtcCalendarDaysInclusive(
+  first: string | null,
+  last: string | null,
+): number {
+  if (!first || !last) return 0
+  const firstDate = new Date(first)
+  const lastDate = new Date(last)
+  if (Number.isNaN(firstDate.getTime()) || Number.isNaN(lastDate.getTime())) return 0
+  const firstDay = Date.UTC(
+    firstDate.getUTCFullYear(),
+    firstDate.getUTCMonth(),
+    firstDate.getUTCDate(),
+  )
+  const lastDay = Date.UTC(
+    lastDate.getUTCFullYear(),
+    lastDate.getUTCMonth(),
+    lastDate.getUTCDate(),
+  )
+  if (lastDay < firstDay) return 0
+  return Math.floor((lastDay - firstDay) / UTC_DAY_MS) + 1
+}
+
+export function resolveStatsDateRange(
+  range: StatsDateRange,
+  now: Date = new Date(),
+): ResolvedStatsDateRange {
+  if (range === 'all') return {}
+  const daysBack = range === '7d' ? 7 : 30
+  const fromDate = new Date(now)
+  fromDate.setUTCDate(now.getUTCDate() - daysBack + 1)
+  return {
+    fromDate: toDateString(fromDate),
+    toDate: toDateString(now),
+  }
+}
+
 /**
  * Aggregates stats for a specific date range.
  * For 'all', uses the cached aggregation. For other ranges, processes files directly.
  */
 export async function aggregateClaudeCodeStatsForRange(
   range: StatsDateRange,
+  options: { now?: Date } = {},
 ): Promise<ClaudeCodeStats> {
   if (range === 'all') {
     return aggregateClaudeCodeStats()
@@ -728,26 +873,28 @@ export async function aggregateClaudeCodeStatsForRange(
   }
 
   // Calculate fromDate based on range
-  const today = new Date()
-  const daysBack = range === '7d' ? 7 : 30
-  const fromDate = new Date(today)
-  fromDate.setDate(today.getDate() - daysBack + 1) // +1 to include today
-  const fromDateStr = toDateString(fromDate)
+  const { fromDate: fromDateStr, toDate: toDateStr } = resolveStatsDateRange(
+    range,
+    options.now ?? new Date(),
+  )
 
   // Process session files for the date range
   const stats = await processSessionFiles(allSessionFiles, {
     fromDate: fromDateStr,
+    toDate: toDateStr,
   })
 
-  return processedStatsToClaudeCodeStats(stats)
+  return processedStatsToClaudeCodeStats(stats, options.now ?? new Date())
 }
 
 /**
  * Convert ProcessedStats to ClaudeCodeStats.
  * Used for filtered date ranges that bypass the cache.
  */
-function processedStatsToClaudeCodeStats(
+export function processedStatsToClaudeCodeStats(
   stats: ProcessedStats,
+  now: Date = new Date(),
+  options: { shotStatsEnabled?: boolean } = {},
 ): ClaudeCodeStats {
   const dailyActivitySorted = stats.dailyActivity
     .slice()
@@ -757,7 +904,7 @@ function processedStatsToClaudeCodeStats(
     .sort((a, b) => a.date.localeCompare(b.date))
 
   // Calculate streaks from daily activity
-  const streaks = calculateStreaks(dailyActivitySorted)
+  const streaks = calculateStreaks(dailyActivitySorted, now)
 
   // Find longest session
   let longestSession: SessionStats | null = null
@@ -800,14 +947,7 @@ function processedStatsToClaudeCodeStats(
       : null
 
   // Total days in range
-  const totalDays =
-    firstSessionDate && lastSessionDate
-      ? Math.ceil(
-          (new Date(lastSessionDate).getTime() -
-            new Date(firstSessionDate).getTime()) /
-            (1000 * 60 * 60 * 24),
-        ) + 1
-      : 0
+  const totalDays = countUtcCalendarDaysInclusive(firstSessionDate, lastSessionDate)
 
   const result: ClaudeCodeStats = {
     totalSessions: stats.sessionStats.length,
@@ -819,6 +959,8 @@ function processedStatsToClaudeCodeStats(
     dailyModelTokens: dailyModelTokensSorted,
     longestSession,
     modelUsage: stats.modelUsage,
+    toolUsage: stats.toolUsage,
+    skillUsage: stats.skillUsage,
     firstSessionDate,
     lastSessionDate,
     peakActivityDay,
@@ -826,7 +968,11 @@ function processedStatsToClaudeCodeStats(
     totalSpeculationTimeSavedMs: stats.totalSpeculationTimeSavedMs,
   }
 
-  if (feature('SHOT_STATS') && stats.shotDistribution) {
+  let shotStatsEnabled = options.shotStatsEnabled === true
+  if (options.shotStatsEnabled === undefined && feature('SHOT_STATS')) {
+    shotStatsEnabled = true
+  }
+  if (shotStatsEnabled && stats.shotDistribution) {
     result.shotDistribution = stats.shotDistribution
     const totalWithShots = Object.values(stats.shotDistribution).reduce(
       (sum, n) => sum + n,
@@ -845,12 +991,15 @@ function processedStatsToClaudeCodeStats(
  * Get the next day after a given date string (YYYY-MM-DD format).
  */
 function getNextDay(dateStr: string): string {
-  const date = new Date(dateStr)
-  date.setDate(date.getDate() + 1)
+  const date = new Date(`${dateStr}T00:00:00.000Z`)
+  date.setUTCDate(date.getUTCDate() + 1)
   return toDateString(date)
 }
 
-function calculateStreaks(dailyActivity: DailyActivity[]): StreakInfo {
+function calculateStreaks(
+  dailyActivity: DailyActivity[],
+  now: Date = new Date(),
+): StreakInfo {
   if (dailyActivity.length === 0) {
     return {
       currentStreak: 0,
@@ -861,8 +1010,11 @@ function calculateStreaks(dailyActivity: DailyActivity[]): StreakInfo {
     }
   }
 
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
+  const today = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  ))
 
   // Calculate current streak (working backwards from today)
   let currentStreak = 0
@@ -879,7 +1031,7 @@ function calculateStreaks(dailyActivity: DailyActivity[]): StreakInfo {
     }
     currentStreak++
     currentStreakStart = dateStr
-    checkDate.setDate(checkDate.getDate() - 1)
+    checkDate.setUTCDate(checkDate.getUTCDate() - 1)
   }
 
   // Calculate longest streak
@@ -930,8 +1082,6 @@ function calculateStreaks(dailyActivity: DailyActivity[]): StreakInfo {
   }
 }
 
-const SHOT_COUNT_REGEX = /(\d+)-shotted by/
-
 /**
  * Extract the shot count from PR attribution text in a `gh pr create` Bash call.
  * The attribution format is: "N-shotted by model-name"
@@ -942,24 +1092,8 @@ function extractShotCountFromMessages(
 ): number | null {
   for (const m of messages) {
     if (m.type !== 'assistant') continue
-    const content = m.message?.content
-    if (!Array.isArray(content)) continue
-    for (const block of content) {
-      if (
-        block.type !== 'tool_use' ||
-        !SHELL_TOOL_NAMES.includes(block.name) ||
-        typeof block.input !== 'object' ||
-        block.input === null ||
-        !('command' in block.input) ||
-        typeof block.input.command !== 'string'
-      ) {
-        continue
-      }
-      const match = SHOT_COUNT_REGEX.exec(block.input.command)
-      if (match) {
-        return parseInt(match[1]!, 10)
-      }
-    }
+    const shotCount = extractShotCountFromAssistantContent(m.message?.content)
+    if (shotCount !== null) return shotCount
   }
   return null
 }
@@ -1052,6 +1186,8 @@ function getEmptyStats(): ClaudeCodeStats {
     dailyModelTokens: [],
     longestSession: null,
     modelUsage: {},
+    toolUsage: {},
+    skillUsage: {},
     firstSessionDate: null,
     lastSessionDate: null,
     peakActivityDay: null,

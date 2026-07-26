@@ -1,11 +1,18 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { CONTEXT_1M_BETA_HEADER } from '../constants/betas.js'
+import { getOpenAICodexContextWindowForModel } from '../services/openaiAuth/models.js'
 import { getGlobalConfig } from './config.js'
+import {
+  calculateContextBudget,
+  calculateContextPercentagesFromTokens,
+  type ProviderUsageTrust,
+} from './contextBudget.js'
 import { isEnvTruthy } from './envUtils.js'
 import { getCanonicalName } from './model/model.js'
 import { getModelCapability } from './model/modelCapabilities.js'
+import { getConfiguredOrBuiltInModelContextWindow } from './model/modelContextWindows.js'
 
-// Model context window size (200k tokens for all models right now)
+// Default fallback when the model-specific capability is unknown.
 export const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
 
 // Maximum output tokens for compact operations
@@ -36,7 +43,7 @@ export function has1mContext(model: string): boolean {
   if (is1mContextDisabled()) {
     return false
   }
-  return /\[1m\]/i.test(model)
+  return /\[1m\]/i.test(model) || /:1m$/i.test(model)
 }
 
 // @[MODEL LAUNCH]: Update this pattern if the new model supports 1M context
@@ -45,7 +52,14 @@ export function modelSupports1M(model: string): boolean {
     return false
   }
   const canonical = getCanonicalName(model)
-  return canonical.includes('claude-sonnet-4') || canonical.includes('opus-4-6')
+  return (
+    canonical.includes('claude-fable-5') ||
+    canonical.includes('claude-sonnet-5') ||
+    canonical.includes('claude-opus-4-8') ||
+    canonical.includes('claude-opus-4-7') ||
+    canonical.includes('claude-sonnet-4') ||
+    canonical.includes('opus-4-6')
+  )
 }
 
 export function getContextWindowForModel(
@@ -69,6 +83,22 @@ export function getContextWindowForModel(
   // [1m] suffix — explicit client-side opt-in, respected over all detection
   if (has1mContext(model)) {
     return 1_000_000
+  }
+
+  const configuredWindow = getConfiguredOrBuiltInModelContextWindow(model)
+  if (configuredWindow !== undefined) {
+    if (
+      configuredWindow > MODEL_CONTEXT_WINDOW_DEFAULT &&
+      is1mContextDisabled()
+    ) {
+      return MODEL_CONTEXT_WINDOW_DEFAULT
+    }
+    return configuredWindow
+  }
+
+  const openAIContextWindow = getOpenAICodexContextWindowForModel(model)
+  if (openAIContextWindow) {
+    return openAIContextWindow
   }
 
   const cap = getModelCapability(model)
@@ -127,20 +157,61 @@ export function calculateContextPercentages(
     return { used: null, remaining: null }
   }
 
-  const totalInputTokens =
+  return calculateContextPercentagesFromTokens(
+    currentUsage.input_tokens +
+      currentUsage.cache_creation_input_tokens +
+      currentUsage.cache_read_input_tokens,
+    contextWindowSize,
+  )
+}
+
+/**
+ * Calculate the current context size after the latest assistant response.
+ *
+ * API usage reports the prompt tokens used for the just-finished request plus
+ * that request's output tokens. The output becomes part of the next request's
+ * conversation context, so omitting it can make context usage appear to drop
+ * immediately after the model finishes responding. The local estimate is kept
+ * as a lower bound because it includes system/tool/message material that some
+ * provider usage payloads under-report.
+ *
+ * Pass `contextWindow` to clamp the result to the model's context window size.
+ * This prevents display values from exceeding 100% for providers (e.g. DeepSeek)
+ * whose input_tokens already approach the window limit before output is added.
+ */
+export function calculateCurrentContextTokenTotal(
+  estimatedTokens: number,
+  currentUsage: {
+    input_tokens: number
+    output_tokens?: number
+    cache_creation_input_tokens: number
+    cache_read_input_tokens: number
+  } | null,
+  contextWindow?: number,
+  options?: { hasMediaInput?: boolean; usageTrust?: ProviderUsageTrust },
+): number {
+  const hasMediaInput = options?.hasMediaInput ?? false
+  const usageTrust = options?.usageTrust ?? 'high'
+
+  if (contextWindow !== undefined) {
+    return calculateContextBudget({
+      estimatedTokens,
+      contextWindow,
+      currentUsage,
+      usageTrust,
+      hasMediaInput,
+    }).usedTokens
+  }
+
+  if (!currentUsage) return estimatedTokens
+
+  const totalFromAPI =
     currentUsage.input_tokens +
     currentUsage.cache_creation_input_tokens +
-    currentUsage.cache_read_input_tokens
+    currentUsage.cache_read_input_tokens +
+    (currentUsage.output_tokens ?? 0)
 
-  const usedPercentage = Math.round(
-    (totalInputTokens / contextWindowSize) * 100,
-  )
-  const clampedUsed = Math.min(100, Math.max(0, usedPercentage))
-
-  return {
-    used: clampedUsed,
-    remaining: 100 - clampedUsed,
-  }
+  return Math.max(estimatedTokens, totalFromAPI)
 }
 
 /**
@@ -164,7 +235,13 @@ export function getModelMaxOutputTokens(model: string): {
 
   const m = getCanonicalName(model)
 
-  if (m.includes('opus-4-6')) {
+  if (
+    m.includes('fable-5') ||
+    m.includes('opus-4-8') ||
+    m.includes('opus-4-7') ||
+    m.includes('opus-4-6') ||
+    m.includes('sonnet-5')
+  ) {
     defaultTokens = 64_000
     upperLimit = 128_000
   } else if (m.includes('sonnet-4-6')) {
